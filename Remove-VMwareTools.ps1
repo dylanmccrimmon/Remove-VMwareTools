@@ -159,20 +159,35 @@ if ($services.length -gt 0) {
 
     foreach ($Service in $Services) {
 
-        Write-Host "Service: $($Service.Name) | " -NoNewline 
+        Write-Host "Service: $($Service.Name)..." -NoNewline 
         
-        # Stop the service
-        Write-Host "Stopping Service | " -NoNewline 
-        Stop-Service -Name $Service.Name -Force
+        # Stop the service via taskkill
+        if ($Service.Name -eq "VMTools") {
+            Start-Process -FilePath "taskkill" -ArgumentList "/F /FI `"SERVICES eq $($Service.Name)`"" -NoNewWindow -Wait
+        } else {
+            try {
+                Stop-Service -Name $Service.Name -Force -ErrorAction Stop
+            } catch {
+                Write-Host "Error occurred while stopping service: $_" -ForegroundColor Red
+            }
+        }
 
         if ($HasRemoveServiceCmdlet) {
-            Remove-Service -Name $Service.Name -Force
+            try {
+                Remove-Service -Name $Service.Name -Force -ErrorAction Stop
+                Write-Host "Removed Service" -ForegroundColor Green
+            }
+            catch {
+                <#Do this if a terminating exception happens#>
+                Write-Host "Error occurred while removing service: $_" -ForegroundColor Red
+            }
         }
         else {
             sc.exe DELETE $Service.Name | Out-Null
+            Write-Host "Removed Service" -ForegroundColor Green
         }
 
-        Write-Host "Removed Service"
+        
 
     }
 }
@@ -181,78 +196,61 @@ if ($services.length -gt 0) {
 $registry = $targets | Where-Object { $_.Type -eq "Registry" }
 
 if ($registry.length -gt 0) {
-    Write-Host "Removing Registry Entries"
 
     foreach ($item in $registry) {
 
-        Write-Host "Removing Registry: $($item.Path) | " -NoNewline
+        # Test if the registry key exists
+        If (!(Test-Path $item.Path)) {
+            Write-Host "Registry $($item.Path) does not exist. Skipping..." -ForegroundColor Yellow
+            Continue
+        }
 
-        Remove-Item -Path $item.Path -Recurse -Force
+        Write-Host "Removing Registry $($item.Path)..." -NoNewline
+
+        try {
+            Remove-Item -Path $item.Path -Recurse -Force -ErrorAction Stop 
+            Write-Host "Removed Registry" -ForegroundColor Green
+        } catch {
+            Write-Host "Error occurred while removing registry: $_" -ForegroundColor Red
+        }
 
         Write-Host "Removed Registry"
     }
 
 }
 
-
+# Remove paths
 $paths = $targets | Where-Object { $_.Type -eq "Path" }
 
-if ($null -ne $paths) {
+# Stop the Windows Event Log service
+Write-Host "Stopping Windows Event Log service..." -NoNewline
 
-    # Restart Windows Event Log service as this locks the 'vmStatsProviderMsgs.dll' file in the VMware Tools directory
-    Write-Host "Restarting Windows Event Log service" -NoNewline
-    Restart-Service -Name "EventLog" -Force
-    Write-Host "Restarted Windows Event Log service"
+try {
+    Stop-Service -Name "EventLog" -Force -ErrorAction Stop 
+    Write-Host "Stopped service" -ForegroundColor Green
+} catch {
+    Write-Host "Failed to stop service: $_" -ForegroundColor Red
+}
 
-    # Remove the files
-    Write-Host "Removing Paths"
+foreach ($path in $paths) {
 
+    Write-Host "Removing Path $($path.path)..." -NoNewline
 
-    foreach ($item in $paths) {
-
-        Write-Host "Removing Path: $($item.Path) | " -NoNewline
-
-        If(Test-Path $item.Path) {
-
-            # Set the ACL recursively to all child items
-            Get-ChildItem -Path $item.Path -Recurse | ForEach-Object {
-                # Take ownership of the path
-                $acl = Get-Acl -Path $item.Path
-                $acl.SetOwner([System.Security.Principal.NTAccount]"Administrators")
-
-                # Grant full control to the Administrators group and the current user
-                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Administrators", "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow")
-                $acl.SetAccessRule($rule)
-                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:UserDomain\$env:USERNAME", "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow")
-                $acl.SetAccessRule($rule)
-                Set-Acl -Path $_.FullName -AclObject $acl
-
-                Remove-Item -Path $_.FullName -Recurse -Force
-
-                if ($_.FullName -like "*vmStatsProviderMsgs.dll") {
-                    Write-Host "Stopping Windows Event Log service" -NoNewline
-                    Stop-Service -Name "EventLog" -Force
-                    
-                    Remove-Item -Path $_.FullName -Recurse -Force
-
-                    Write-Host "Starting Windows Event Log service" -NoNewline
-                    Start-Service -Name "EventLog" -Force
-                } else {
-
-                    Remove-Item -Path $_.FullName -Recurse -Force
-
-                }
-
-
-            }
-
-            # Remove the parent item
-            Remove-Item -Path $item.Path -Recurse -Force
-        }
-
-        Write-Host "Removed Path"
+    try {
+        Remove-Item -Path $path.path -Recurse -Force -ErrorAction Stop 
+        Write-Host "Removed Path" -ForegroundColor Green
+    } catch {
+        Write-Host "Error occurred while removing path: $_" -ForegroundColor Red
     }
 
+}
+
+Write-Host "Starting Windows Event Log service..." -NoNewline
+try {
+    Start-Service -Name "EventLog"
+    Write-Host "Started service" -ForegroundColor Green
+} catch {
+    Write-Host "Failed to start service: $_" -ForegroundColor Red
 }
 
 Write-Host "It is recommended to restart your computer to ensure all VMware Tools components are removed. Re-run this script to check that all components are removed." -ForegroundColor Yellow
